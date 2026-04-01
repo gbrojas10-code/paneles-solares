@@ -1,4 +1,216 @@
-<!DOCTYPE html>
+<!DOCTYPE html>// ============================================================
+//  CONTROL PANELES SOLARES — Google Apps Script
+//  Pegá este código en tu Google Sheets:
+//  Extensiones → Apps Script → reemplazá todo el contenido
+// ============================================================
+
+const HOJA_DIARIO   = 'Cargas_Diarias';
+const HOJA_FACTURAS = 'Facturas_EDESUR';
+
+function doGet(e) {
+  const accion = e.parameter.accion || '';
+  if (accion === 'ping')      return json({ ok: true });
+  if (accion === 'historial') return json(getHistorial());
+  if (accion === 'facturas')  return json(getFacturas());
+  if (accion === 'novedades') return json(getNovedades());
+  return json({ ok: false, msg: 'Acción no reconocida' });
+}
+
+function doPost(e) {
+  try {
+    const p = JSON.parse(e.postData.contents);
+    if (p.accion === 'cargar_diario')   return json(guardarDiario(p));
+    if (p.accion === 'guardar_factura')    return json(guardarFactura(p));
+    if (p.accion === 'guardar_novedad')     return json(guardarNovedad(p));
+    if (p.accion === 'actualizar_novedad_estado') return json(actualizarEstadoNovedad(p));
+    return json({ ok: false, msg: 'Acción no reconocida' });
+  } catch(err) {
+    return json({ ok: false, error: err.toString() });
+  }
+}
+
+// ─── CARGA DIARIA ────────────────────────────────────────────
+function guardarDiario(p) {
+  const ss   = SpreadsheetApp.getActiveSpreadsheet();
+  const hoja = getOrCreate(ss, HOJA_DIARIO);
+
+  if (hoja.getLastRow() === 0) {
+    const headers = [
+      'Fecha', 'Generación acumulada (KWh)', 'Consumo total fábrica (KWh)', '% Solar',
+      'Alertas', 'Inversores cargados',
+      'INV1-PVC','INV2-PVC','INV3-PVC','INV4-PVC','INV5-PVC','INV6-PVC',
+      'INV1-DRY','INV2-DRY','INV3-DRY','INV4-DRY',
+      'INV1-STE','INV2-STE','Timestamp'
+    ];
+    hoja.appendRow(headers);
+    hoja.getRange(1,1,1,headers.length).setFontWeight('bold');
+    hoja.setFrozenRows(1);
+  }
+
+  const datos = p.datos || {};
+  const fila = [
+    p.fecha,
+    p.gen_acumulada || 0,
+    p.consumo_total || '',
+    p.pct_solar ? p.pct_solar + '%' : '',
+    p.alertas_cnt || 0,
+    p.inversores_cnt || 0,
+    datos['INV1-PVC'] || '', datos['INV2-PVC'] || '', datos['INV3-PVC'] || '',
+    datos['INV4-PVC'] || '', datos['INV5-PVC'] || '', datos['INV6-PVC'] || '',
+    datos['INV1-DRY'] || '', datos['INV2-DRY'] || '', datos['INV3-DRY'] || '', datos['INV4-DRY'] || '',
+    datos['INV1-STE'] || '', datos['INV2-STE'] || '',
+    new Date().toISOString()
+  ];
+
+  // Reemplazar si ya existe la fecha, sino agregar
+  const existente = buscarFila(hoja, p.fecha);
+  if (existente > 0) {
+    hoja.getRange(existente, 1, 1, fila.length).setValues([fila]);
+  } else {
+    hoja.appendRow(fila);
+  }
+
+  hoja.getRange(hoja.getLastRow(), 1).setNumberFormat('dd/mm/yyyy');
+  return { ok: true, msg: 'Guardado correctamente' };
+}
+
+// ─── FACTURA ─────────────────────────────────────────────────
+function guardarFactura(p) {
+  const ss   = SpreadsheetApp.getActiveSpreadsheet();
+  const hoja = getOrCreate(ss, HOJA_FACTURAS);
+
+  if (hoja.getLastRow() === 0) {
+    hoja.appendRow(['Mes', 'Año', 'EDESUR (KWh)', 'Vendida a red (KWh)', 'Generación paneles (KWh)', 'Consumo total fábrica (KWh)', '% Solar', 'Timestamp']);
+    hoja.getRange(1,1,1,8).setFontWeight('bold');
+    hoja.setFrozenRows(1);
+  }
+
+  const fila = [p.mes, p.anio, p.edesur, p.vendida, p.gen, p.ct, p.pct ? p.pct+'%' : '', new Date().toISOString()];
+
+  // Reemplazar si ya existe mes/año
+  const datos = hoja.getDataRange().getValues();
+  let filaExist = -1;
+  for (let i=1; i<datos.length; i++) {
+    if (parseInt(datos[i][0])===parseInt(p.mes) && parseInt(datos[i][1])===parseInt(p.anio)) { filaExist=i+1; break; }
+  }
+  if (filaExist > 0) hoja.getRange(filaExist,1,1,fila.length).setValues([fila]);
+  else hoja.appendRow(fila);
+
+  return { ok: true, msg: 'Factura guardada' };
+}
+
+// ─── HISTORIAL ───────────────────────────────────────────────
+function getHistorial() {
+  const hoja = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(HOJA_DIARIO);
+  if (!hoja || hoja.getLastRow() <= 1) return { ok:true, data:[] };
+  const rows = hoja.getDataRange().getValues().slice(1).reverse();
+  const data = rows.slice(0,90).map(r => ({
+    fecha:    r[0] ? Utilities.formatDate(new Date(r[0]), Session.getScriptTimeZone(), 'yyyy-MM-dd') : '',
+    gen:      parseFloat(r[1]) || 0,
+    ct:       parseFloat(r[2]) || 0,
+    pct:      r[3] ? parseInt(r[3]) : 0,
+    alertas:  parseInt(r[4]) || 0,
+    cnt:      parseInt(r[5]) || 0,
+    datos: {
+      'INV1-PVC':r[6],'INV2-PVC':r[7],'INV3-PVC':r[8],'INV4-PVC':r[9],'INV5-PVC':r[10],'INV6-PVC':r[11],
+      'INV1-DRY':r[12],'INV2-DRY':r[13],'INV3-DRY':r[14],'INV4-DRY':r[15],
+      'INV1-STE':r[16],'INV2-STE':r[17]
+    }
+  }));
+  return { ok:true, data };
+}
+
+function getFacturas() {
+  const hoja = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(HOJA_FACTURAS);
+  if (!hoja || hoja.getLastRow() <= 1) return { ok:true, data:[] };
+  const data = hoja.getDataRange().getValues().slice(1).map(r => ({
+    mes:parseInt(r[0]), anio:parseInt(r[1]), edesur:parseFloat(r[2])||0,
+    vendida:parseFloat(r[3])||0, gen:parseFloat(r[4])||0, ct:parseFloat(r[5])||0, pct:parseInt(r[6])||0
+  }));
+  return { ok:true, data };
+}
+
+// ─── HELPERS ─────────────────────────────────────────────────
+function getOrCreate(ss, nombre) {
+  return ss.getSheetByName(nombre) || ss.insertSheet(nombre);
+}
+function buscarFila(hoja, fecha) {
+  if (hoja.getLastRow() <= 1) return -1;
+  const vals = hoja.getRange(2,1,hoja.getLastRow()-1,1).getValues();
+  for (let i=0; i<vals.length; i++) {
+    const d = vals[i][0];
+    if (d && Utilities.formatDate(new Date(d), Session.getScriptTimeZone(), 'yyyy-MM-dd') === fecha) return i+2;
+  }
+  return -1;
+}
+function json(data) {
+  return ContentService.createTextOutput(JSON.stringify(data)).setMimeType(ContentService.MimeType.JSON);
+}
+
+// ─── TEST ────────────────────────────────────────────────────
+function testCarga() {
+  const r = guardarDiario({
+    fecha:'2026-03-30', gen_acumulada:3250, consumo_total:21000, pct_solar:15,
+    alertas_cnt:0, inversores_cnt:12,
+    datos:{'INV1-PVC':280,'INV2-PVC':265,'INV3-PVC':270,'INV4-PVC':285,'INV5-PVC':278,'INV6-PVC':340,
+           'INV1-DRY':260,'INV2-DRY':258,'INV3-DRY':240,'INV4-DRY':255,'INV1-STE':260,'INV2-STE':159}
+  });
+  Logger.log(JSON.stringify(r));
+}
+
+// ─── NOVEDADES ────────────────────────────────────────────────
+const HOJA_NOVEDADES = 'Novedades';
+
+function guardarNovedad(p) {
+  const ss   = SpreadsheetApp.getActiveSpreadsheet();
+  const hoja = getOrCreate(ss, HOJA_NOVEDADES);
+
+  if (hoja.getLastRow() === 0) {
+    hoja.appendRow(['ID','Fecha','Tipo','Inversor','Descripción','Estado','Responsable','Timestamp']);
+    hoja.getRange(1,1,1,8).setFontWeight('bold');
+    hoja.setFrozenRows(1);
+    // Formato condicional visual por estado
+    const rango = hoja.getRange('F2:F1000');
+    const reglaAbierto = SpreadsheetApp.newConditionalFormatRule()
+      .whenTextEqualTo('abierto').setBackground('#FFF3CD').build();
+    const reglaCerrado = SpreadsheetApp.newConditionalFormatRule()
+      .whenTextEqualTo('cerrado').setBackground('#D4EDDA').build();
+    hoja.setConditionalFormatRules([reglaAbierto, reglaCerrado]);
+  }
+
+  hoja.appendRow([p.id||Date.now(), p.fecha, p.tipo, p.inversor||'General', p.desc, p.estado||'abierto', p.resp||'', new Date().toISOString()]);
+  hoja.getRange(hoja.getLastRow(), 2).setNumberFormat('dd/mm/yyyy');
+  return { ok: true, msg: 'Novedad guardada' };
+}
+
+function actualizarEstadoNovedad(p) {
+  const hoja = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(HOJA_NOVEDADES);
+  if (!hoja) return { ok: false };
+  const vals = hoja.getDataRange().getValues();
+  for (let i=1; i<vals.length; i++) {
+    if (String(vals[i][0]) === String(p.id)) {
+      hoja.getRange(i+1, 6).setValue(p.estado);
+      return { ok: true };
+    }
+  }
+  return { ok: false, msg: 'Novedad no encontrada' };
+}
+
+function getNovedades() {
+  const hoja = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(HOJA_NOVEDADES);
+  if (!hoja || hoja.getLastRow() <= 1) return { ok:true, data:[] };
+  const data = hoja.getDataRange().getValues().slice(1).reverse().slice(0,200).map(r => ({
+    id:      r[0],
+    fecha:   r[1] ? Utilities.formatDate(new Date(r[1]), Session.getScriptTimeZone(), 'yyyy-MM-dd') : '',
+    tipo:    r[2] || 'observacion',
+    inversor:r[3] || 'General',
+    desc:    r[4] || '',
+    estado:  r[5] || 'abierto',
+    resp:    r[6] || '',
+    ts:      r[7] || ''
+  }));
+  return { ok:true, data };
+}
 <html lang="es">
 <head>
 <meta charset="UTF-8">
